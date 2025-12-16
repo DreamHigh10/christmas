@@ -1,0 +1,1022 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
+
+// --- Firebase Initialization ---
+const firebaseConfig = {
+  apiKey: "AIzaSyD2zgoBY4687VE6j-LpmS01Z5ySYEJdHHM",
+  authDomain: "christmas-69b3c.firebaseapp.com",
+  projectId: "christmas-69b3c",
+  storageBucket: "christmas-69b3c.firebasestorage.app",
+  messagingSenderId: "621126186660",
+  appId: "1:621126186660:web:4c356e9bef35fbe91fd831",
+  measurementId: "G-VJZ753Y7XC"
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Constants & Assets ---
+const SNOWFLAKES = ['❄', '❅', '❆', '•'];
+const MEMORY_ICONS = ['🎅', '🎄', '🎁', '⛄', '🔔', '🦌', '🕯️', '🍪'];
+const CHESS_PIECES = { 
+    white: {k:'♔',q:'♕',r:'♖',b:'♗',n:'♘',p:'♙'}, 
+    black: {k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟'} 
+};
+
+export default function App() {
+  // --- State ---
+  const [user, setUser] = useState(null);
+  const [playerName, setPlayerName] = useState(localStorage.getItem('dreamteam_player_name') || "");
+  const [inputName, setInputName] = useState("");
+  const [currentSection, setCurrentSection] = useState('home'); // home, games, about
+  const [activeGame, setActiveGame] = useState('sleigh');
+  const [leaderboardOpen, setLeaderboardOpen] = useState(false);
+  const [leaderboardData, setLeaderboardData] = useState([]);
+  const [loadingScores, setLoadingScores] = useState(false);
+  const [activeTab, setActiveTab] = useState('sleigh');
+  const [isMuted, setIsMuted] = useState(false);
+  const [snowflakes, setSnowflakes] = useState([]);
+
+  // --- Game State Refs (Mutable state that doesn't trigger re-renders for loops) ---
+  const audioCtxRef = useRef(null);
+  const sleighState = useRef({ active: false, score: 0, lives: 3, playerX: 300, items: [], lastItemTime: 0, speed: 3 });
+  const racerState = useRef({ active: false, score: 0, playerY: 320, velocityY: 0, isJumping: false, obstacles: [], speed: 5 });
+  const ludoState = useRef({ turn: 0, dice: 0, tokens: { 0: [-1,-1,-1,-1], 1: [-1,-1,-1,-1] } });
+  
+  // Game UI State (to force re-renders when game values change)
+  const [sleighUI, setSleighUI] = useState({ score: 0, lives: 3, gameOver: false });
+  const [racerUI, setRacerUI] = useState({ distance: 0, gameOver: false });
+  const [ludoUI, setLudoUI] = useState({ msg: "Roll 6 to start!", p1Color: "text-red-500", p2Color: "text-green-500" });
+  
+  // React-managed Game States
+  const [chessBoard, setChessBoard] = useState([]);
+  const [chessStatus, setChessStatus] = useState("Your Turn (White)");
+  const [selectedSquare, setSelectedSquare] = useState(null);
+  const [isPlayerTurn, setIsPlayerTurn] = useState(true);
+
+  const [bjDeck, setBjDeck] = useState([]);
+  const [bjPlayerHand, setBjPlayerHand] = useState([]);
+  const [bjDealerHand, setBjDealerHand] = useState([]);
+  const [bjGameActive, setBjGameActive] = useState(false);
+  const [bjMessage, setBjMessage] = useState("");
+  
+  const [memoryCards, setMemoryCards] = useState([]);
+  const [memoryFlipped, setMemoryFlipped] = useState([]);
+  const [memoryMatched, setMemoryMatched] = useState([]);
+  const [memoryMoves, setMemoryMoves] = useState(0);
+
+  const [clickerToys, setClickerToys] = useState(0);
+  const [clickerTps, setClickerTps] = useState(0);
+  const [upgrades, setUpgrades] = useState({
+      elf: {cost: 15, p: 1, count: 0},
+      machine: {cost: 100, p: 5, count: 0},
+      santa: {cost: 1000, p: 50, count: 0}
+  });
+
+  const sleighAnimRef = useRef(null);
+  const racerAnimRef = useRef(null);
+  const clickerIntervalRef = useRef(null);
+
+  // --- Auth & Init ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        // 1. Try environment token first (if available)
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          try {
+            await signInWithCustomToken(auth, __initial_auth_token);
+            return; // Success, exit
+          } catch (tokenError) {
+            console.warn("Environment token mismatch (expected if using custom config). Falling back to anonymous auth.");
+            // Proceed to anonymous fallback
+          }
+        }
+        
+        // 2. Fallback to Anonymous Auth
+        await signInAnonymously(auth);
+        
+      } catch (e) {
+        console.error("Auth error:", e);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
+    
+    // Generate Snow
+    const flakes = Array.from({ length: 50 }).map((_, i) => ({
+      id: i,
+      char: SNOWFLAKES[Math.floor(Math.random() * SNOWFLAKES.length)],
+      left: Math.random() * 100 + 'vw',
+      opacity: Math.random(),
+      fontSize: (Math.random() * 20 + 10) + 'px',
+      duration: (Math.random() * 5 + 5) + 's',
+      delay: (Math.random() * 5) + 's'
+    }));
+    setSnowflakes(flakes);
+
+    return () => unsubscribe();
+  }, []);
+
+  // --- Sound Manager ---
+  const playSound = useCallback((type) => {
+    if (isMuted) return;
+    if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = audioCtxRef.current;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const now = ctx.currentTime;
+
+    switch (type) {
+      case 'jump':
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.linearRampToValueAtTime(300, now + 0.1);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+        break;
+      case 'collect':
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(600, now);
+        osc.frequency.setValueAtTime(1200, now + 0.05);
+        gain.gain.setValueAtTime(0.05, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+        break;
+      case 'crash':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(100, now);
+        osc.frequency.linearRampToValueAtTime(50, now + 0.3);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.start(now);
+        osc.stop(now + 0.3);
+        break;
+      case 'win':
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.setValueAtTime(600, now + 0.1);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.4);
+        osc.start(now);
+        osc.stop(now + 0.4);
+        break;
+      default: // click
+        osc.frequency.setValueAtTime(800, now);
+        gain.gain.setValueAtTime(0.05, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+        osc.start(now);
+        osc.stop(now + 0.05);
+    }
+  }, [isMuted]);
+
+  // --- Data Logic ---
+  const saveScore = async (game, score, sortOrder = 'desc') => {
+    if (!user || !playerName) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'scores'), {
+        uid: user.uid,
+        name: playerName,
+        game,
+        score: Number(score),
+        timestamp: Date.now(),
+        sortOrder
+      });
+      // Refresh if viewing
+      if (leaderboardOpen && activeTab === game) fetchLeaderboard(game);
+    } catch (e) { console.error("Save score error", e); }
+  };
+
+  const fetchLeaderboard = async (gameType) => {
+    setLoadingScores(true);
+    setLeaderboardData([]);
+    try {
+      const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'scores'));
+      let scores = [];
+      snap.forEach(doc => {
+        const d = doc.data();
+        if (d.game === gameType) scores.push(d);
+      });
+      
+      scores.sort((a, b) => gameType === 'memory' ? a.score - b.score : b.score - a.score);
+      setLeaderboardData(scores.slice(0, 10));
+    } catch (e) { console.error(e); }
+    setLoadingScores(false);
+  };
+
+  const handleNameSubmit = () => {
+    if (inputName.trim()) {
+      setPlayerName(inputName);
+      localStorage.setItem('dreamteam_player_name', inputName);
+      playSound('win');
+    }
+  };
+
+  // --- Game Loops & Logic ---
+
+  // 1. Sleigh Dash
+  const startSleigh = () => {
+    sleighState.current = { active: true, score: 0, lives: 3, playerX: 300, items: [], lastItemTime: 0, speed: 2 };
+    setSleighUI({ score: 0, lives: 3, gameOver: false });
+    
+    const canvas = document.getElementById('sleighCanvas');
+    if(!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const loop = (ts) => {
+      if (!sleighState.current.active) return;
+      const state = sleighState.current;
+      ctx.clearRect(0, 0, 600, 400);
+      
+      // Draw Player
+      ctx.font = "50px serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+      ctx.fillText("🛷", state.playerX, 390);
+
+      // Spawn
+      if (ts - state.lastItemTime > 800) {
+        let type = Math.random()>0.8?2:(Math.random()>0.95?3:(Math.random()>0.5?0:1));
+        if (Math.random() < 0.3 + (state.score/1000)) type=2;
+        state.items.push({x:Math.random()*560+20, y:-50, type});
+        state.lastItemTime = ts; 
+        state.speed = 2 + (state.score/200);
+      }
+
+      // Update Items
+      const chars = ["🎁","🍪","⚫","🌟"]; const vals = [10,5,-1,50];
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        let it = state.items[i];
+        it.y += state.speed;
+        ctx.fillText(chars[it.type], it.x, it.y);
+
+        if (Math.sqrt((it.x - state.playerX)**2 + (it.y - 365)**2) < 40) {
+            if (it.type === 2) { // Coal
+                state.lives--;
+                setSleighUI(prev => ({ ...prev, lives: state.lives }));
+                playSound('crash');
+            } else {
+                state.score += vals[it.type];
+                setSleighUI(prev => ({ ...prev, score: state.score }));
+                playSound('collect');
+            }
+            state.items.splice(i, 1);
+        } else if (it.y > 450) state.items.splice(i, 1);
+      }
+
+      if (state.lives <= 0) {
+        state.active = false;
+        setSleighUI(prev => ({ ...prev, gameOver: true }));
+        saveScore('sleigh', state.score);
+      } else {
+        sleighAnimRef.current = requestAnimationFrame(loop);
+      }
+    };
+    sleighAnimRef.current = requestAnimationFrame(loop);
+  };
+
+  const handleSleighMove = (e) => {
+      const canvas = document.getElementById('sleighCanvas');
+      if(!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const scaleX = canvas.width / rect.width;
+      let newX = (clientX - rect.left) * scaleX;
+      if(newX < 25) newX = 25; if(newX > canvas.width-25) newX = canvas.width-25;
+      sleighState.current.playerX = newX;
+  };
+
+  // 2. Racer
+  const startRacer = () => {
+      racerState.current = { active: true, score: 0, playerY: 320, velocityY: 0, isJumping: false, obstacles: [], speed: 5 };
+      setRacerUI({ distance: 0, gameOver: false });
+      
+      const canvas = document.getElementById('racerCanvas');
+      if(!canvas) return;
+      const ctx = canvas.getContext('2d');
+
+      const loop = () => {
+          if (!racerState.current.active) return;
+          const state = racerState.current;
+          
+          ctx.clearRect(0,0,600,400); 
+          ctx.fillStyle="#e2e8f0"; ctx.fillRect(0,360,600,40); // Ground
+
+          state.velocityY += 0.6; state.playerY += state.velocityY;
+          if(state.playerY > 320) { state.playerY = 320; state.velocityY = 0; state.isJumping = false; }
+          
+          ctx.font="40px serif"; ctx.fillText("🦌", 50, state.playerY+40);
+
+          if(Math.random()<0.02 && (state.obstacles.length===0 || 600-state.obstacles[state.obstacles.length-1].x > 300)) {
+              state.obstacles.push({x:600});
+          }
+
+          state.speed += 0.005; 
+          state.score += state.speed/10;
+          setRacerUI(prev => ({...prev, distance: Math.floor(state.score)}));
+
+          for(let i=state.obstacles.length-1; i>=0; i--) {
+              let obs=state.obstacles[i]; obs.x-=state.speed;
+              ctx.fillText("⛄", obs.x, 360);
+              
+              // Collision
+              if(obs.x<90 && obs.x>20 && state.playerY>290) {
+                  state.active = false;
+                  setRacerUI(prev => ({...prev, gameOver: true}));
+                  saveScore('racer', Math.floor(state.score));
+                  playSound('crash');
+                  return;
+              }
+              if(obs.x<-50) state.obstacles.splice(i,1);
+          }
+          racerAnimRef.current = requestAnimationFrame(loop);
+      };
+      racerAnimRef.current = requestAnimationFrame(loop);
+  };
+
+  const handleRacerJump = () => {
+      if(racerState.current.active && !racerState.current.isJumping) {
+          racerState.current.velocityY = -12;
+          racerState.current.isJumping = true;
+          playSound('jump');
+      }
+  };
+
+  // 3. Chess
+  const initChess = () => {
+      const row1 = ['r','n','b','q','k','b','n','r'];
+      const board = [
+          row1.map(p => ({c:'black', t:p})),
+          Array(8).fill({c:'black', t:'p'}),
+          ...Array(4).fill(Array(8).fill(null)),
+          Array(8).fill({c:'white', t:'p'}),
+          row1.map(p => ({c:'white', t:p}))
+      ];
+      setChessBoard(board);
+      setIsPlayerTurn(true);
+      setChessStatus("Your Turn (White)");
+  };
+
+  const handleChessClick = (r, c) => {
+      if(!isPlayerTurn || activeGame !== 'chess') return;
+      const clicked = chessBoard[r][c];
+      
+      // Select
+      if(clicked && clicked.c === 'white') {
+          setSelectedSquare({r, c});
+          playSound('click');
+          return;
+      }
+
+      // Move
+      if(selectedSquare) {
+          if(clicked && clicked.c === 'white') return; // Can't eat self
+          
+          const newBoard = chessBoard.map(row => [...row]);
+          const piece = newBoard[selectedSquare.r][selectedSquare.c];
+          
+          if(clicked && clicked.t === 'k') {
+              playSound('win');
+              alert("Checkmate! You caught Santa!");
+              saveScore('chess', 100);
+              initChess();
+              return;
+          }
+
+          newBoard[r][c] = piece;
+          newBoard[selectedSquare.r][selectedSquare.c] = null;
+          setChessBoard(newBoard);
+          setSelectedSquare(null);
+          setIsPlayerTurn(false);
+          playSound('collect');
+          setChessStatus("Santa is thinking...");
+          
+          setTimeout(() => santaChessMove(newBoard), 1000);
+      }
+  };
+
+  const santaChessMove = (currentBoard) => {
+      let moves = [];
+      currentBoard.forEach((row, r) => {
+          row.forEach((sq, c) => {
+              if(sq && sq.c === 'black') {
+                  // Simplified AI: check surrounding squares
+                  for(let dr=-1; dr<=1; dr++) {
+                      for(let dc=-1; dc<=1; dc++) {
+                          if(dr===0 && dc===0) continue;
+                          const nr = r+dr, nc = c+dc;
+                          if(nr>=0 && nr<8 && nc>=0 && nc<8) {
+                              const target = currentBoard[nr][nc];
+                              if(!target || target.c === 'white') {
+                                  moves.push({from:{r,c}, to:{r:nr, c:nc}, capture: target && target.t==='k'});
+                              }
+                          }
+                      }
+                  }
+              }
+          });
+      });
+
+      if(moves.length > 0) {
+          const move = moves.find(m => m.capture) || moves[Math.floor(Math.random() * moves.length)];
+          const newBoard = currentBoard.map(row => [...row]);
+          newBoard[move.to.r][move.to.c] = newBoard[move.from.r][move.from.c];
+          newBoard[move.from.r][move.from.c] = null;
+          setChessBoard(newBoard);
+
+          if(move.capture) {
+              alert("Santa caught your King! Game Over.");
+              initChess();
+              return;
+          }
+      }
+      setIsPlayerTurn(true);
+      setChessStatus("Your Turn");
+      playSound('click');
+  };
+
+  // 4. Ludo (Canvas)
+  const drawLudo = () => {
+      const canvas = document.getElementById('ludoCanvas');
+      if(!canvas) return;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,450,450);
+      
+      // Board
+      ctx.fillStyle = '#fecaca'; ctx.fillRect(0,0,180,180); 
+      ctx.fillStyle = '#bbf7d0'; ctx.fillRect(270,0,180,180); 
+      ctx.fillStyle = '#e2e8f0'; ctx.fillRect(0,270,180,180);
+      ctx.fillStyle = '#fef08a'; ctx.fillRect(270,270,180,180);
+      
+      // Tracks
+      ctx.fillStyle = 'white'; ctx.fillRect(180,0,90,450); ctx.fillRect(0,180,450,90);
+      ctx.strokeStyle = 'black';
+      [180,210,240].forEach(x => ctx.strokeRect(x,0,30,450));
+      [180,210,240].forEach(y => ctx.strokeRect(0,y,450,30));
+      
+      // Center
+      ctx.fillStyle = '#f59e0b'; ctx.beginPath(); ctx.moveTo(180,180); ctx.lineTo(270,180); ctx.lineTo(270,270); ctx.lineTo(180,270); ctx.fill();
+
+      // Tokens
+      const drawTokens = (pid, color) => {
+          ludoState.current.tokens[pid].forEach((pos, idx) => {
+              let x, y;
+              if (pos === -1) {
+                  x = (pid===0?45:315) + (idx%2)*50;
+                  y = (pid===0?45:45) + Math.floor(idx/2)*50;
+              } else {
+                  const angle = (pos / 52) * Math.PI * 2;
+                  x = 225 + Math.cos(angle) * 100;
+                  y = 225 + Math.sin(angle) * 100;
+              }
+              ctx.beginPath(); ctx.arc(x,y,12,0,Math.PI*2);
+              ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+          });
+      };
+      drawTokens(0, 'red'); drawTokens(1, 'green');
+  };
+
+  const rollLudo = () => {
+      if(ludoState.current.turn !== 0) return;
+      const roll = Math.floor(Math.random()*6)+1;
+      setLudoUI(prev => ({...prev, msg: `You rolled a ${roll}!`}));
+      playSound('click');
+
+      let tokens = ludoState.current.tokens[0];
+      let moved = false;
+
+      if(roll === 6) {
+          let homeIdx = tokens.indexOf(-1);
+          if(homeIdx !== -1) { tokens[homeIdx] = 0; moved = true; }
+          else {
+              let best = -1, max = -1;
+              tokens.forEach((t,i) => { if(t>-1 && t<50 && t>max) { max=t; best=i; }});
+              if(best !== -1) { tokens[best] += roll; moved = true; }
+          }
+      } else {
+          let best = -1, max = -1;
+          tokens.forEach((t,i) => { if(t>-1 && t<50 && t>max) { max=t; best=i; }});
+          if(best !== -1) { tokens[best] += roll; moved = true; }
+      }
+
+      if(moved) playSound('collect');
+      drawLudo();
+
+      if(tokens.every(t => t >= 50)) {
+          alert("You Win Ludo!");
+          saveScore('ludo', 1);
+          ludoState.current = { turn: 0, dice: 0, tokens: { 0: [-1,-1,-1,-1], 1: [-1,-1,-1,-1] } };
+          return;
+      }
+      ludoState.current.turn = 1;
+      setTimeout(ludoCPUTurn, 1000);
+  };
+
+  const ludoCPUTurn = () => {
+      const roll = Math.floor(Math.random()*6)+1;
+      setLudoUI(prev => ({...prev, msg: `Santa rolled a ${roll}!`}));
+      
+      let tokens = ludoState.current.tokens[1];
+      if(roll === 6) {
+          let homeIdx = tokens.indexOf(-1);
+          if(homeIdx !== -1) tokens[homeIdx] = 0;
+          else {
+              let best = -1, max = -1;
+              tokens.forEach((t,i) => { if(t>-1 && t<50 && t>max) { max=t; best=i; }});
+              if(best !== -1) tokens[best] += roll;
+          }
+      } else {
+           let best = -1, max = -1;
+           tokens.forEach((t,i) => { if(t>-1 && t<50 && t>max) { max=t; best=i; }});
+           if(best !== -1) tokens[best] += roll;
+      }
+      drawLudo();
+      ludoState.current.turn = 0;
+  };
+
+  // 5. Blackjack
+  const calcHand = (h) => {
+      let s=0, a=0;
+      h.forEach(c => {
+          let v = ['J','Q','K'].includes(c.rank) ? 10 : (c.rank==='A' ? 11 : parseInt(c.rank));
+          s += v; if(c.rank==='A') a++;
+      });
+      while(s>21 && a>0) { s-=10; a--; }
+      return s;
+  };
+
+  const dealBJ = () => {
+      const r = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+      const s = ['♠','♥','♣','♦'];
+      let d = []; r.forEach(x => s.forEach(y => d.push({rank:x, suit:y})));
+      d.sort(() => Math.random() - 0.5);
+      
+      const p = [d.pop(), d.pop()];
+      const dl = [d.pop(), d.pop()];
+      
+      setBjDeck(d); setBjPlayerHand(p); setBjDealerHand(dl);
+      setBjGameActive(true); setBjMessage("");
+      playSound('click');
+      
+      if(calcHand(p) === 21) handleBjStand(p, dl, d);
+  };
+
+  const hitBJ = () => {
+      const p = [...bjPlayerHand, bjDeck[bjDeck.length-1]];
+      setBjPlayerHand(p);
+      setBjDeck(d => d.slice(0, -1));
+      playSound('click');
+      if(calcHand(p) > 21) {
+          setBjGameActive(false);
+          setBjMessage("Bust! Santa wins.");
+          playSound('crash');
+      }
+  };
+
+  const handleBjStand = (pHand = bjPlayerHand, dHand = bjDealerHand, deck = bjDeck) => {
+      let currentDHand = [...dHand];
+      let currentDeck = [...deck];
+      while(calcHand(currentDHand) < 17) {
+          currentDHand.push(currentDeck.pop());
+      }
+      setBjDealerHand(currentDHand);
+      setBjDeck(currentDeck);
+      setBjGameActive(false);
+      
+      const p = calcHand(pHand);
+      const d = calcHand(currentDHand);
+      
+      if(d > 21 || p > d) { 
+          setBjMessage("You Win!"); 
+          saveScore('blackjack', 10); 
+          playSound('win');
+      } else if(p < d) {
+          setBjMessage("Santa Wins.");
+          playSound('crash');
+      } else setBjMessage("Push.");
+  };
+
+  // 6. Memory
+  const initMemory = () => {
+      const cards = [...MEMORY_ICONS, ...MEMORY_ICONS].sort(() => Math.random() - 0.5)
+          .map((icon, i) => ({ id: i, icon, flipped: false, matched: false }));
+      setMemoryCards(cards);
+      setMemoryFlipped([]);
+      setMemoryMatched([]);
+      setMemoryMoves(0);
+  };
+
+  const handleCardClick = (id) => {
+      if(memoryFlipped.length >= 2 || memoryFlipped.includes(id) || memoryMatched.includes(id)) return;
+      
+      playSound('click');
+      const newFlipped = [...memoryFlipped, id];
+      setMemoryFlipped(newFlipped);
+      
+      if(newFlipped.length === 2) {
+          setMemoryMoves(m => m + 1);
+          const c1 = memoryCards.find(c => c.id === newFlipped[0]);
+          const c2 = memoryCards.find(c => c.id === newFlipped[1]);
+          
+          if(c1.icon === c2.icon) {
+              setMemoryMatched(prev => [...prev, c1.id, c2.id]);
+              setMemoryFlipped([]);
+              playSound('collect');
+              if(memoryMatched.length + 2 === memoryCards.length) {
+                  setTimeout(() => { alert("Victory!"); saveScore('memory', memoryMoves, 'asc'); playSound('win'); }, 500);
+              }
+          } else {
+              setTimeout(() => setMemoryFlipped([]), 1000);
+          }
+      }
+  };
+
+  // 7. Clicker
+  useEffect(() => {
+      if(activeGame !== 'clicker') {
+          if(clickerIntervalRef.current) clearInterval(clickerIntervalRef.current);
+          return;
+      }
+      clickerIntervalRef.current = setInterval(() => {
+          if(clickerTps > 0) {
+              setClickerToys(t => t + (clickerTps/10));
+          }
+      }, 100);
+      return () => clearInterval(clickerIntervalRef.current);
+  }, [activeGame, clickerTps]);
+
+  const clickerBuy = (type) => {
+      const u = upgrades[type];
+      if(clickerToys >= u.cost) {
+          setClickerToys(t => t - u.cost);
+          setUpgrades(prev => ({
+              ...prev,
+              [type]: { ...u, cost: Math.floor(u.cost * 1.15), count: u.count + 1 }
+          }));
+          setClickerTps(t => t + u.p);
+          playSound('collect');
+      }
+  };
+
+  // --- Effects to start/stop loop-based games ---
+  useEffect(() => {
+      if(currentSection !== 'games') return;
+      if(activeGame === 'sleigh') startSleigh();
+      else cancelAnimationFrame(sleighAnimRef.current);
+
+      if(activeGame === 'racer') startRacer();
+      else cancelAnimationFrame(racerAnimRef.current);
+
+      if(activeGame === 'chess' && chessBoard.length === 0) initChess();
+      if(activeGame === 'ludo') {
+          // Ludo canvas needs short delay to ensure DOM exists
+          setTimeout(drawLudo, 100);
+      }
+      if(activeGame === 'memory' && memoryCards.length === 0) initMemory();
+
+      return () => {
+          cancelAnimationFrame(sleighAnimRef.current);
+          cancelAnimationFrame(racerAnimRef.current);
+      }
+  }, [currentSection, activeGame]);
+
+
+  // --- Render ---
+  return (
+    <div className="min-h-screen flex flex-col bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 text-white font-sans overflow-hidden">
+      {/* Snow */}
+      <div className="fixed inset-0 pointer-events-none z-50">
+        {snowflakes.map(flake => (
+          <div key={flake.id} className="absolute top-[-20px] text-white animate-[fall_linear_infinite]"
+               style={{
+                 left: flake.left, opacity: flake.opacity, fontSize: flake.fontSize,
+                 animationDuration: flake.duration, animationDelay: flake.delay
+               }}>
+            {flake.char}
+          </div>
+        ))}
+        <style>{`@keyframes fall { to { transform: translateY(100vh); } }`}</style>
+      </div>
+
+      {/* Login Modal */}
+      {!playerName && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm px-4">
+          <div className="bg-slate-800 border-4 border-yellow-500 rounded-2xl p-8 max-w-md w-full text-center relative">
+            <h2 className="text-3xl font-bold text-yellow-400 mb-2 font-serif">Welcome to The Dreamteam</h2>
+            <div className="my-6 p-4 bg-slate-900/50 rounded-lg italic text-green-300 font-serif text-lg border-l-4 border-green-500">
+              "As a Man Thinketh in his Heart, So He is."
+            </div>
+            <input 
+              type="text" 
+              placeholder="e.g. FrostyTheCoder" 
+              className="w-full px-4 py-3 bg-slate-900 border border-slate-600 rounded-lg text-white text-center text-xl mb-4"
+              value={inputName}
+              onChange={e => setInputName(e.target.value)}
+              maxLength={15}
+            />
+            <button onClick={handleNameSubmit} className="w-full py-3 bg-red-600 hover:bg-red-500 font-bold rounded-lg shadow-lg">
+              ENTER THE HOLIDAY ZONE
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Leaderboard Modal */}
+      {leaderboardOpen && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm px-4">
+          <div className="bg-slate-800 border-2 border-slate-600 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[80vh]">
+            <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-900">
+              <h3 className="text-2xl font-bold text-yellow-400 font-serif">🏆 Hall of Fame</h3>
+              <button onClick={() => setLeaderboardOpen(false)} className="text-2xl">&times;</button>
+            </div>
+            <div className="flex overflow-x-auto border-b border-slate-700">
+              {['sleigh','racer','blackjack','chess','ludo','memory','clicker'].map(g => (
+                <button key={g} onClick={() => { setActiveTab(g); fetchLeaderboard(g); }}
+                        className={`px-4 py-3 text-sm font-bold capitalize ${activeTab === g ? 'text-yellow-200 border-b-2 border-yellow-400 bg-slate-700/50' : 'text-gray-400'}`}>
+                  {g}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-800 min-h-[300px]">
+              {loadingScores ? <div className="text-center animate-pulse">Loading...</div> : 
+               leaderboardData.length === 0 ? <div className="text-center text-gray-400">No scores yet.</div> :
+               leaderboardData.map((s, i) => (
+                 <div key={i} className={`flex justify-between p-3 rounded mb-2 ${s.name===playerName ? 'bg-green-900/50 border border-green-500' : 'bg-slate-700/50'}`}>
+                   <div className="flex gap-3"><span className="text-yellow-500 w-6">#{i+1}</span> <span>{s.name} {s.name===playerName && '(You)'}</span></div>
+                   <div className="text-green-300 font-mono font-bold">{s.score}</div>
+                 </div>
+               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="w-full bg-red-700 shadow-lg border-b-4 border-yellow-400 z-40 relative">
+        <div className="container mx-auto px-4 py-3 flex flex-col md:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-3xl animate-bounce">🎄</span>
+            <div>
+              <h1 className="text-3xl font-bold font-serif leading-none">The Dreamteam</h1>
+              <div className="flex gap-2 text-xs items-center">
+                <span className="text-red-100 font-bold tracking-wider uppercase">Holiday Special</span>
+                <span className="text-yellow-300 font-bold truncate max-w-[150px]">{playerName}</span>
+              </div>
+            </div>
+          </div>
+          <nav className="flex gap-4 items-center flex-wrap justify-center font-bold">
+            <button onClick={() => { setCurrentSection('home'); playSound('click'); }} className="hover:text-yellow-300">Home</button>
+            <button onClick={() => { setCurrentSection('games'); playSound('click'); }} className="hover:text-yellow-300">Games</button>
+            <button onClick={() => { setCurrentSection('about'); playSound('click'); }} className="hover:text-yellow-300">About</button>
+            <button onClick={() => setIsMuted(!isMuted)} className="text-xl">{isMuted ? '🔇' : '🔊'}</button>
+            <button onClick={() => { setLeaderboardOpen(true); fetchLeaderboard(activeTab); playSound('click'); }} className="bg-yellow-500 text-red-900 px-3 py-1 rounded-full hover:scale-105 shadow-md flex items-center gap-1">
+              <span>🏆</span> Scores
+            </button>
+          </nav>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-grow container mx-auto px-4 py-8 z-10 relative">
+        
+        {/* HOME SECTION */}
+        {currentSection === 'home' && (
+          <div className="text-center space-y-8 animate-[fadeIn_0.5s_ease-out]">
+            <div className="bg-slate-800/80 backdrop-blur-md p-8 rounded-2xl border border-slate-700 shadow-2xl max-w-4xl mx-auto">
+              <h2 className="text-5xl md:text-7xl font-bold text-yellow-400 mb-4 drop-shadow-lg font-serif">Happy Holidays!</h2>
+              <p className="text-xl md:text-2xl text-gray-200 mb-8 max-w-2xl mx-auto">
+                Welcome to the official holiday hub powered by <strong className="text-red-400">The Dreamteam</strong>.
+              </p>
+              <button onClick={() => { setCurrentSection('games'); playSound('click'); }} className="px-8 py-4 text-lg font-bold bg-green-600 rounded-xl hover:bg-green-700 hover:scale-105 shadow-xl transition">
+                🎮 Play Games
+              </button>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-6xl mx-auto">
+              {[
+                  {id:'sleigh', i:'🛷', n:'Sleigh Dash'}, {id:'racer', i:'🦌', n:"Rudolph's Racer"},
+                  {id:'chess', i:'♟️', n:"Santa's Chess"}, {id:'ludo', i:'🎲', n:'Elf Ludo'},
+                  {id:'blackjack', i:'🃏', n:'Blackjack'}, {id:'memory', i:'⛄', n:'Memory'},
+                  {id:'clicker', i:'🔨', n:'Workshop'}
+              ].map(g => (
+                  <div key={g.id} onClick={() => { setActiveGame(g.id); setCurrentSection('games'); playSound('click'); }}
+                       className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 hover:border-yellow-400 cursor-pointer hover:-translate-y-1 transition">
+                      <div className="text-4xl mb-2">{g.i}</div><h3 className="font-bold">{g.n}</h3>
+                  </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* GAMES SECTION */}
+        {currentSection === 'games' && (
+          <div className="space-y-6">
+            <div className="flex flex-col items-center bg-slate-800 p-4 rounded-xl border-l-4 border-green-500 shadow-lg">
+              <h2 className="text-3xl font-bold font-serif mb-4">Game Zone</h2>
+              <div className="flex flex-wrap gap-2 justify-center">
+                {['sleigh', 'racer', 'chess', 'ludo', 'blackjack', 'memory', 'clicker'].map(g => (
+                    <button key={g} onClick={() => { setActiveGame(g); playSound('click'); }} 
+                            className={`px-3 py-1 rounded capitalize font-bold ${activeGame===g ? 'bg-yellow-500 text-black' : 'bg-slate-600 hover:bg-slate-500'}`}>
+                        {g}
+                    </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sleigh Canvas */}
+            <div className={activeGame === 'sleigh' ? 'block' : 'hidden'}>
+                <div className="relative w-full max-w-2xl mx-auto bg-slate-900 rounded-xl overflow-hidden shadow-2xl border-4 border-slate-700">
+                    <canvas id="sleighCanvas" width="600" height="400" className="w-full h-auto cursor-none touch-none bg-gradient-to-b from-slate-800 to-slate-900"
+                            onMouseMove={handleSleighMove} onTouchMove={handleSleighMove} />
+                    <div className="absolute top-4 left-4 right-4 flex justify-between font-bold text-xl pointer-events-none">
+                        <span className="text-yellow-400">Score: {sleighUI.score}</span>
+                        <span className="text-red-400">Lives: {"❤️".repeat(sleighUI.lives)}</span>
+                    </div>
+                    {sleighUI.gameOver && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
+                            <h3 className="text-5xl font-bold text-red-500 mb-2 font-serif">GAME OVER</h3>
+                            <button onClick={startSleigh} className="px-8 py-3 bg-white text-slate-900 rounded-full font-bold text-xl hover:scale-110 transition">TRY AGAIN</button>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Racer Canvas */}
+            <div className={activeGame === 'racer' ? 'block' : 'hidden'}>
+                <div className="relative w-full max-w-2xl mx-auto bg-sky-900 rounded-xl overflow-hidden shadow-2xl border-4 border-slate-700">
+                    <canvas id="racerCanvas" width="600" height="400" className="w-full h-auto cursor-pointer touch-none"
+                            onClick={handleRacerJump} onTouchStart={(e) => { e.preventDefault(); handleRacerJump(); }} />
+                    <div className="absolute top-4 left-4 font-bold text-xl pointer-events-none text-yellow-400">Distance: {racerUI.distance}m</div>
+                    {racerUI.gameOver && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
+                            <h3 className="text-5xl font-bold text-red-500 mb-2 font-serif">CRASHED!</h3>
+                            <button onClick={startRacer} className="px-8 py-3 bg-white text-slate-900 rounded-full font-bold text-xl hover:scale-110 transition">TRY AGAIN</button>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Chess */}
+            {activeGame === 'chess' && (
+                <div className="flex flex-col items-center bg-slate-800 p-4 rounded-xl border border-slate-600 max-w-lg mx-auto">
+                    <div className="flex justify-between w-full mb-4 px-2 font-bold">
+                        <div>You (White)</div><div className="text-red-400">Santa (Black)</div>
+                    </div>
+                    <div className="grid grid-cols-8 w-full max-w-[400px] aspect-square border-4 border-[#5c4033]">
+                        {chessBoard.flat().map((sq, i) => {
+                            const r = Math.floor(i/8), c = i%8;
+                            const isDark = (r+c)%2 !== 0;
+                            const isSelected = selectedSquare?.r === r && selectedSquare?.c === c;
+                            return (
+                                <div key={i} onClick={() => handleChessClick(r,c)}
+                                     className={`flex items-center justify-center text-3xl cursor-pointer ${isDark ? 'bg-[#b58863]' : 'bg-[#f0d9b5]'} ${isSelected ? 'shadow-[inset_0_0_0_4px_#fbbf24]' : ''}`}
+                                     style={{ color: sq?.c === 'white' ? 'white' : 'black', textShadow: sq?.c === 'white' ? '0 0 2px black' : 'none' }}>
+                                    {sq ? CHESS_PIECES[sq.c][sq.t] : ''}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <div className="mt-4 flex gap-4 items-center">
+                        <button onClick={initChess} className="px-4 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm">Reset</button>
+                        <div className="text-yellow-400 font-bold">{chessStatus}</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Ludo */}
+            <div className={activeGame === 'ludo' ? 'block' : 'hidden'}>
+                <div className="flex flex-col items-center bg-slate-800 p-4 rounded-xl border border-slate-600 max-w-xl mx-auto">
+                    <canvas id="ludoCanvas" width="450" height="450" className="bg-white rounded shadow-lg max-w-full h-auto" />
+                    <div className="flex justify-between items-center w-full mt-4 px-4 bg-slate-900 p-3 rounded">
+                        <div className={`font-bold ${ludoUI.p1Color}`}>Player: 🔴</div>
+                        <button onClick={rollLudo} className="px-6 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-bold rounded-full shadow-lg animate-pulse">ROLL DICE</button>
+                        <div className={`font-bold ${ludoUI.p2Color}`}>Santa: 🟢</div>
+                    </div>
+                    <div className="text-center text-white font-bold mt-2 h-6">{ludoUI.msg}</div>
+                </div>
+            </div>
+
+            {/* Blackjack */}
+            {activeGame === 'blackjack' && (
+                <div className="max-w-2xl mx-auto p-6 md:p-8 rounded-2xl relative bg-[#0f5132] border-8 border-[#5c4033]">
+                    <div className="text-center mb-8">
+                        <h3 className="text-red-300 font-bold mb-2 uppercase text-sm">Santa</h3>
+                        <div className="flex justify-center gap-2 h-24 md:h-32">
+                            {bjDealerHand.map((c, i) => (
+                                <div key={i} className={`w-16 md:w-24 h-24 md:h-32 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center text-xl md:text-2xl font-bold ${!bjGameActive || i>0 ? (['♥','♦'].includes(c.suit)?'text-red-600':'text-black') : 'bg-red-700 text-white'}`}>
+                                    {bjGameActive && i===0 ? '🎄' : <>{c.rank}<div className="text-2xl">{c.suit}</div></>}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="text-center my-4 h-8 text-yellow-400 font-bold text-xl">{bjMessage}</div>
+                    <div className="text-center mb-8">
+                        <h3 className="text-blue-300 font-bold mb-2 uppercase text-sm">You ({calcHand(bjPlayerHand)})</h3>
+                        <div className="flex justify-center gap-2 h-24 md:h-32">
+                            {bjPlayerHand.map((c, i) => (
+                                <div key={i} className={`w-16 md:w-24 h-24 md:h-32 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center text-xl md:text-2xl font-bold ${['♥','♦'].includes(c.suit)?'text-red-600':'text-black'}`}>
+                                    {c.rank}<div className="text-2xl">{c.suit}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="flex justify-center gap-4 mt-6">
+                        {!bjGameActive ? (
+                            <button onClick={dealBJ} className="px-8 py-3 bg-yellow-500 hover:bg-yellow-400 text-red-900 font-bold rounded-full shadow-lg">DEAL</button>
+                        ) : (
+                            <>
+                                <button onClick={hitBJ} className="px-8 py-3 bg-green-600 hover:bg-green-500 font-bold rounded-full">HIT</button>
+                                <button onClick={() => handleBjStand()} className="px-8 py-3 bg-red-600 hover:bg-red-500 font-bold rounded-full">STAND</button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Memory */}
+            {activeGame === 'memory' && (
+                <div className="max-w-2xl mx-auto">
+                    <div className="flex justify-between items-center mb-4 px-4 bg-slate-800 p-3 rounded-lg">
+                        <div className="text-xl font-bold text-blue-300">Moves: {memoryMoves}</div>
+                        <button onClick={initMemory} className="px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 rounded font-bold">Reset</button>
+                    </div>
+                    <div className="grid grid-cols-4 gap-3 md:gap-4 p-4 bg-slate-800 rounded-xl border border-slate-700 shadow-xl">
+                        {memoryCards.map(c => (
+                            <div key={c.id} onClick={() => handleCardClick(c.id)} className={`h-24 md:h-32 cursor-pointer relative group perspective-1000 ${memoryFlipped.includes(c.id) || memoryMatched.includes(c.id) ? 'rotate-y-180' : ''}`}>
+                                <div className={`w-full h-full absolute transition-transform duration-500 preserve-3d ${(memoryFlipped.includes(c.id) || memoryMatched.includes(c.id)) ? 'rotate-y-180' : ''}`} style={{transformStyle: 'preserve-3d', transform: (memoryFlipped.includes(c.id) || memoryMatched.includes(c.id)) ? 'rotateY(180deg)' : 'rotateY(0deg)'}}>
+                                    <div className="absolute w-full h-full backface-hidden flex items-center justify-center rounded-xl bg-slate-800 border-2 border-slate-700 text-3xl opacity-20">❄️</div>
+                                    <div className={`absolute w-full h-full backface-hidden flex items-center justify-center rounded-xl bg-gradient-to-br from-red-500 to-red-700 border-2 border-red-400 text-3xl md:text-5xl ${memoryMatched.includes(c.id) ? 'ring-4 ring-yellow-400' : ''}`} style={{transform: 'rotateY(180deg)'}}>
+                                        {c.icon}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Workshop Clicker */}
+            {activeGame === 'clicker' && (
+                <div className="max-w-3xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-slate-800 p-8 rounded-xl border-b-4 border-green-600 text-center flex flex-col items-center justify-center space-y-6 shadow-xl">
+                        <div>
+                            <h3 className="text-2xl text-green-400 font-bold mb-1 font-serif">Inventory</h3>
+                            <div className="text-5xl font-black text-white">{Math.floor(clickerToys)}</div>
+                            <div className="text-sm text-gray-400 mt-1">{clickerTps} toys / sec</div>
+                        </div>
+                        <button onClick={() => { setClickerToys(t => t+1); playSound('click'); }} className="w-48 h-48 rounded-full bg-gradient-to-br from-green-500 to-green-700 border-8 border-green-800 shadow-[0_10px_0_rgb(20,83,45)] active:translate-y-[10px] active:shadow-none flex flex-col items-center justify-center transition-all group">
+                             <span className="text-6xl filter drop-shadow-md group-hover:scale-110 transition">🧸</span>
+                             <span className="font-black text-green-100 mt-2 text-lg">MAKE</span>
+                        </button>
+                        <button onClick={() => { saveScore('clicker', Math.floor(clickerToys)); alert('Saved!'); playSound('win'); }} className="text-xs bg-slate-700 hover:bg-slate-600 py-1 px-3 rounded-full">Save Score</button>
+                    </div>
+                    <div className="bg-slate-800 p-6 rounded-xl border-b-4 border-yellow-600 shadow-xl">
+                        <h3 className="text-xl font-bold text-yellow-400 mb-4 border-b border-slate-700 pb-2 font-serif">Upgrades</h3>
+                        <div className="space-y-3">
+                            {Object.entries(upgrades).map(([key, u]) => (
+                                <button key={key} onClick={() => clickerBuy(key)} disabled={clickerToys < u.cost} 
+                                        className={`w-full flex justify-between items-center p-3 bg-slate-700 rounded-lg transition ${clickerToys < u.cost ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-600'}`}>
+                                    <div className="flex items-center gap-3">
+                                        <div className="text-2xl">{{elf:'🧝',machine:'⚙️',santa:'🎅'}[key]}</div>
+                                        <div className="text-left"><div className="font-bold capitalize">{key}</div><div className="text-xs text-green-300">+{u.p}/s</div></div>
+                                    </div>
+                                    <div className="text-right text-yellow-400 font-bold">{u.cost}</div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
+          </div>
+        )}
+
+        {/* ABOUT SECTION */}
+        {currentSection === 'about' && (
+          <div className="max-w-2xl mx-auto bg-white text-slate-900 p-8 rounded-2xl shadow-2xl relative overflow-hidden animate-[fadeIn_0.5s_ease-out]">
+            <div className="absolute top-0 left-0 w-full h-4 bg-red-600"></div>
+            <div className="absolute bottom-0 left-0 w-full h-4 bg-green-600"></div>
+            <h2 className="text-4xl font-bold mb-6 text-center text-red-700 font-serif">About The Dreamteam</h2>
+            <div className="space-y-4 text-lg text-slate-700 leading-relaxed">
+              <p><strong className="text-red-600">The Dreamteam</strong> is a forward-thinking collective of innovators, developers, and creative minds passionate about merging technology with imagination.</p>
+              <p>We believe in the power of digital experiences to bring people together. Our mission is to craft intuitive, joyful, and engaging web applications that leave a lasting smile.</p>
+            </div>
+            <div className="text-center mt-8 border-t border-slate-200 pt-6">
+              <p className="font-bold text-slate-500">© 2024 The Dreamteam.</p>
+              <p className="text-sm text-slate-400">Made with ❤️ and ☕</p>
+            </div>
+          </div>
+        )}
+
+      </main>
+      
+      <footer className="bg-slate-900 text-slate-500 py-6 text-center text-sm border-t border-slate-800 z-10 relative">
+        <p>Powered by <span className="text-slate-300 font-bold">The Dreamteam</span> | Happy Holidays!</p>
+      </footer>
+    </div>
+  );
+}
